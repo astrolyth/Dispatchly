@@ -275,7 +275,9 @@ const getUserHierarchy = async (req, res, next) => {
     // Direct reports
     const [userRes, reportsRes, chainRes] = await Promise.all([
       pool.query(`
-        SELECT u.*, m.name AS manager_name, d.name AS department_name, t.name AS team_name
+        SELECT u.id, u.email, u.name, u.role, u.title, u.department, u.is_active,
+               u.current_status, u.department_id, u.team_id, u.manager_id,
+               m.name AS manager_name, d.name AS department_name, t.name AS team_name
         FROM users u
         LEFT JOIN users m ON m.id = u.manager_id
         LEFT JOIN departments d ON d.id = u.department_id

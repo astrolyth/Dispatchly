@@ -16,13 +16,14 @@ const { createTicketFromEmail } = require('../services/emailService');
  * If not set, the endpoint is open (useful for dev/testing).
  */
 async function inboundEmail(req, res) {
-  // Optional secret-based authentication
+  // Unauthenticated public endpoint: refuse to run without a shared secret
   const secret = process.env.EMAIL_WEBHOOK_SECRET;
-  if (secret) {
-    const provided = req.headers['x-webhook-secret'] || req.body.secret;
-    if (provided !== secret) {
-      return res.status(401).json({ error: 'Invalid webhook secret' });
-    }
+  if (!secret) {
+    return res.status(503).json({ error: 'Inbound email webhook is disabled (EMAIL_WEBHOOK_SECRET not set)' });
+  }
+  const provided = req.headers['x-webhook-secret'] || req.body.secret;
+  if (provided !== secret) {
+    return res.status(401).json({ error: 'Invalid webhook secret' });
   }
 
   const { from, subject, text, messageId } = req.body;

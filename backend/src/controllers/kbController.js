@@ -1,4 +1,5 @@
 const pool = require('../db/pool');
+const { REQUESTER_ROLES } = require('../config/constants');
 
 // ─── Query helper ─────────────────────────────────────────────────────────────
 
@@ -86,11 +87,15 @@ const getArticle = async (req, res, next) => {
     const {
       rows: [article],
     } = await pool.query('SELECT * FROM kb_articles WHERE id = $1', [req.params.id]);
-    if (!article) return res.status(404).json({ error: 'Article not found' });
+    // Requesters only see published articles and never the (someone else's) source ticket
+    const isRequester = REQUESTER_ROLES.includes(req.user.role);
+    if (!article || (isRequester && !article.is_published)) {
+      return res.status(404).json({ error: 'Article not found' });
+    }
 
     const [tagsRes, ticketRes] = await Promise.all([
       pool.query('SELECT tag FROM kb_tags WHERE article_id = $1', [article.id]),
-      article.source_ticket_id
+      article.source_ticket_id && !isRequester
         ? pool.query(
             `SELECT id, title, type, priority, category, created_at
              FROM tickets WHERE id = $1`,

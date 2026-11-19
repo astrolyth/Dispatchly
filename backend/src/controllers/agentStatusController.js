@@ -1,6 +1,7 @@
 const pool = require('../db/pool');
 const { updateAgentStatus } = require('../services/scheduleManager');
 const { canManageUser } = require('../middleware/rbac');
+const { REQUESTER_ROLES } = require('../config/constants');
 
 // Valid statuses agents can self-select (managers can set any)
 const SELF_SETTABLE = ['available', 'on_duty', 'busy', 'break', 'lunch', 'training', 'meeting', 'offline'];
@@ -62,6 +63,9 @@ const getStatusBoard = async (req, res, next) => {
 const getUserStatus = async (req, res, next) => {
   try {
     const userId = parseInt(req.params.userId || req.user.userId, 10);
+    if (REQUESTER_ROLES.includes(req.user.role) && userId !== req.user.userId) {
+      return res.status(403).json({ error: 'Cannot view this user\'s status' });
+    }
     const { rows: [user] } = await pool.query(`
       SELECT
         u.id, u.name, u.current_status, u.current_status_reason,

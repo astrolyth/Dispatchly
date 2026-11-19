@@ -137,6 +137,8 @@ const getAnalytics = async (req, res, next) => {
     const { role, userId } = req.user;
     const { clause, values } = visibilityClause(role, userId);
     const period = Math.min(parseInt(req.query.period || '30', 10), 90);
+    // `clause` binds the user id as $1, so period goes after the visibility values
+    const periodParam = `$${values.length + 1}`;
 
     const isStaff = !REQUESTER_ROLES.includes(role) && role !== 'technician';
 
@@ -147,9 +149,9 @@ const getAnalytics = async (req, res, next) => {
          COUNT(*) AS created,
          COUNT(*) FILTER (WHERE status IN ('Resolved','Closed')) AS resolved
        FROM tickets
-       WHERE created_at >= NOW() - ($1 || ' days')::interval ${clause}
+       WHERE created_at >= NOW() - (${periodParam} || ' days')::interval ${clause}
        GROUP BY 1 ORDER BY 1`,
-      [period, ...values]
+      [...values, period]
     );
 
     // ── 2. SLA compliance by priority (last `period` days, closed/resolved) ───
@@ -163,9 +165,9 @@ const getAnalytics = async (req, res, next) => {
          ) AS met
        FROM tickets
        WHERE status IN ('Resolved','Closed')
-         AND created_at >= NOW() - ($1 || ' days')::interval ${clause}
+         AND created_at >= NOW() - (${periodParam} || ' days')::interval ${clause}
        GROUP BY priority`,
-      [period, ...values]
+      [...values, period]
     );
 
     // ── 3. MTTR trend — average resolution time per week ─────────────────────
@@ -177,9 +179,9 @@ const getAnalytics = async (req, res, next) => {
        FROM tickets
        WHERE status IN ('Resolved','Closed')
          AND resolved_at IS NOT NULL
-         AND resolved_at >= NOW() - ($1 || ' days')::interval ${clause}
+         AND resolved_at >= NOW() - (${periodParam} || ' days')::interval ${clause}
        GROUP BY 1 ORDER BY 1`,
-      [period, ...values]
+      [...values, period]
     );
 
     // ── 4. Agent performance (staff only) ─────────────────────────────────────
@@ -238,9 +240,9 @@ const getAnalytics = async (req, res, next) => {
            END
          )) AS avg_resolution_minutes
        FROM tickets
-       WHERE created_at >= NOW() - ($1 || ' days')::interval ${clause}
+       WHERE created_at >= NOW() - (${periodParam} || ' days')::interval ${clause}
        GROUP BY 1 ORDER BY total DESC`,
-      [period, ...values]
+      [...values, period]
     );
 
     // ── 6. Pending approvals & overdue tickets ────────────────────────────────
@@ -300,8 +302,8 @@ const getAnalytics = async (req, res, next) => {
          WHERE ticket_id = t.id AND is_internal = FALSE
          ORDER BY created_at ASC LIMIT 1
        ) tc ON TRUE
-       WHERE t.created_at >= NOW() - ($1 || ' days')::interval ${clause}`,
-      [period, ...values]
+       WHERE t.created_at >= NOW() - (${periodParam} || ' days')::interval ${clause}`,
+      [...values, period]
     );
 
     res.json({

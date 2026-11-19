@@ -5,6 +5,26 @@ const { getCurrentOncallUser } = require('./oncallController');
 const { notify, notifyMany } = require('../services/notifier');
 const { autoAssign } = require('../services/skillsRouter');
 const { onTicketResolved } = require('../services/scheduleManager');
+const { canViewTicket } = require('../utils/ticketAccess');
+
+/**
+ * Route guard for /api/tickets/:id/* sub-resources: 404 if missing, 403 if not visible.
+ */
+const requireTicketAccess = async (req, res, next) => {
+  try {
+    const {
+      rows: [ticket],
+    } = await pool.query(
+      'SELECT id, created_by_user_id, assigned_to_user_id FROM tickets WHERE id = $1',
+      [req.params.id]
+    );
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+    if (!canViewTicket(req.user, ticket)) return res.status(403).json({ error: 'Access denied' });
+    next();
+  } catch (err) {
+    next(err);
+  }
+};
 
 // ─── Notification helpers (thin wrappers kept for backward compat) ────────────
 
@@ -181,19 +201,19 @@ const getTicket = async (req, res, next) => {
     );
     if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
 
-    // Role-based access check
-    const { role, userId } = req.user;
-    if (REQUESTER_ROLES.includes(role) && ticket.created_by_user_id !== userId) {
+    if (!canViewTicket(req.user, ticket)) {
       return res.status(403).json({ error: 'Access denied' });
     }
-    if (role === 'technician' && ticket.assigned_to_user_id !== userId) {
-      return res.status(403).json({ error: 'Access denied — ticket not assigned to you' });
-    }
 
+    // Requesters never see internal staff notes
+    const isRequester = REQUESTER_ROLES.includes(req.user.role);
     const [commentsRes, escalationsRes] = await Promise.all([
-      pool.query('SELECT * FROM ticket_comments WHERE ticket_id = $1 ORDER BY created_at ASC', [
-        ticket.id,
-      ]),
+      pool.query(
+        `SELECT * FROM ticket_comments
+         WHERE ticket_id = $1 AND ($2::boolean OR is_internal = FALSE)
+         ORDER BY created_at ASC`,
+        [ticket.id, !isRequester]
+      ),
       pool.query('SELECT * FROM escalations WHERE ticket_id = $1 ORDER BY escalated_at ASC', [
         ticket.id,
       ]),
@@ -767,4 +787,5 @@ module.exports = {
   convertToKb,
   acceptAssignment,
   declineAssignment,
+  requireTicketAccess,
 };

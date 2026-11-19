@@ -14,6 +14,7 @@ const cron = require('node-cron');
 const pool = require('../db/pool');
 const { computeSla, computeTicketSla, setBusinessHoursConfig } = require('../utils/sla');
 const { notify, notifyMany } = require('./notifier');
+const { ESCALATION_TEAMS } = require('../config/constants');
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -92,13 +93,13 @@ async function checkPrimarySlas(managerIds) {
         const escalateFired = await tryFireAlert(ticket.id, 'auto_escalated');
         if (escalateFired) {
           await pool.query(
-            `UPDATE tickets
-             SET  status            = 'Escalated',
-                  escalated_at      = NOW(),
-                  escalated_by      = 'System (SLA breach)',
-                  escalation_reason = 'Auto-escalated: SLA breached'
-             WHERE id = $1`,
+            `UPDATE tickets SET status = 'Escalated', updated_at = NOW() WHERE id = $1`,
             [ticket.id]
+          );
+          await pool.query(
+            `INSERT INTO escalations (ticket_id, reason, escalated_to_team, escalated_by)
+             VALUES ($1, 'Auto-escalated: SLA breached', $2, 'System (SLA breach)')`,
+            [ticket.id, ESCALATION_TEAMS[ticket.category] || 'Tier 2 Support']
           );
 
           const escMsg = `🚨 Auto-escalated: "${title}" exceeded SLA and was escalated automatically.`;

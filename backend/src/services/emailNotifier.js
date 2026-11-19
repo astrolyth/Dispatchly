@@ -58,6 +58,13 @@ const SUBJECT_PREFIX = {
 
 // ─── HTML template ────────────────────────────────────────────────────────────
 
+const escapeHtml = (s) =>
+  String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
 function buildHtml({ message, ticketId, ticketTitle, type }) {
   const ticketLink = ticketId ? `${APP_URL}/tickets/${ticketId}` : null;
   const priorityColor = {
@@ -100,14 +107,14 @@ function buildHtml({ message, ticketId, ticketTitle, type }) {
           <!-- Body -->
           <tr>
             <td style="padding:28px 28px 20px;">
-              <p style="margin:0;font-size:15px;color:#111827;line-height:1.6;">${message.replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>
+              <p style="margin:0;font-size:15px;color:#111827;line-height:1.6;">${escapeHtml(message)}</p>
 
               ${ticketId && ticketTitle ? `
               <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:20px;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
                 <tr>
                   <td style="padding:14px 16px;background:#f9fafb;">
                     <p style="margin:0;font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;letter-spacing:.05em;">Ticket</p>
-                    <p style="margin:4px 0 0;font-size:14px;color:#111827;font-weight:600;">#${ticketId} — ${ticketTitle}</p>
+                    <p style="margin:4px 0 0;font-size:14px;color:#111827;font-weight:600;">#${ticketId} — ${escapeHtml(ticketTitle)}</p>
                   </td>
                 </tr>
               </table>
@@ -178,4 +185,4 @@ async function sendNotificationEmail({ toEmail, toName, type, message, ticketId,
   }
 }
 
-module.exports = { sendNotificationEmail };
+module.exports = { sendNotificationEmail, buildHtml };

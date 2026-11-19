@@ -12,6 +12,7 @@ const {
   convertToKb,
   acceptAssignment,
   declineAssignment,
+  requireTicketAccess,
 } = require('../controllers/ticketController');
 const { getApproval, approveTicket, rejectTicket } = require('../controllers/approvalController');
 const { getTimeEntries, logTime } = require('../controllers/timeController');
@@ -45,10 +46,10 @@ router.post('/:id/comments', addComment);
 router.post('/:id/convert-to-kb', requireRole(...CAN_CONVERT_KB), convertToKb);
 
 // Linked problems
-router.get('/:id/problems', getTicketProblems);
+router.get('/:id/problems', requireTicketAccess, getTicketProblems);
 
 // Time tracking
-router.get('/:id/time', getTimeEntries);
+router.get('/:id/time', requireTicketAccess, getTimeEntries);
 router.post('/:id/time', requireRole('admin', 'manager', 'agent', 'technician', 'specialist'), logTime);
 
 // Assignment accept / decline — technicians only
@@ -56,7 +57,7 @@ router.post('/:id/accept', requireRole('technician', 'agent', 'specialist'), acc
 router.post('/:id/decline', requireRole('technician', 'agent', 'specialist'), declineAssignment);
 
 // Approval workflow (managers and admins only)
-router.get('/:id/approval', getApproval);
+router.get('/:id/approval', requireTicketAccess, getApproval);
 router.post('/:id/approve', requireRole('admin', 'manager'), approveTicket);
 router.post('/:id/reject', requireRole('admin', 'manager'), rejectTicket);
 
