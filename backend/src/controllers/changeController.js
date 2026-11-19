@@ -97,8 +97,45 @@ async function getChange(req, res, next) {
 
 // ─── PATCH /api/changes/:id ───────────────────────────────────────────────────
 
+// Allowed status moves via PATCH. Submitted→Approved/Rejected goes through approve/reject.
+const NEXT_STATUS = {
+  Draft: ['Cancelled'],
+  Submitted: ['Cancelled'],
+  Approved: ['In Progress', 'Cancelled'],
+  'In Progress': ['Completed', 'Cancelled'],
+};
+
 async function updateChange(req, res, next) {
   try {
+    const {
+      rows: [current],
+    } = await pool.query('SELECT * FROM change_requests WHERE id = $1', [req.params.id]);
+    if (!current) return res.status(404).json({ error: 'Change request not found' });
+
+    // Status transition
+    if (req.body.status !== undefined) {
+      if (req.body.status === current.status) return res.json({ change: current });
+      if (!(NEXT_STATUS[current.status] || []).includes(req.body.status)) {
+        return res
+          .status(409)
+          .json({ error: `Cannot move a change from ${current.status} to ${req.body.status}` });
+      }
+      const {
+        rows: [change],
+      } = await pool.query(
+        `UPDATE change_requests SET status = $1, updated_at = NOW()
+         WHERE id = $2 AND status = $3 RETURNING *`,
+        [req.body.status, current.id, current.status]
+      );
+      if (!change) return res.status(409).json({ error: 'Change was modified — reload and retry' });
+      return res.json({ change });
+    }
+
+    // Content is frozen once submitted, so approvers approve exactly what gets implemented
+    if (current.status !== 'Draft') {
+      return res.status(409).json({ error: 'Only Draft change requests can be edited' });
+    }
+
     const ALLOWED = [
       'title', 'description', 'type', 'risk_level', 'implementation_plan',
       'rollback_plan', 'affected_systems', 'maintenance_window_start', 'maintenance_window_end',
@@ -122,10 +159,11 @@ async function updateChange(req, res, next) {
     const {
       rows: [change],
     } = await pool.query(
-      `UPDATE change_requests SET ${sets.join(', ')} WHERE id = $${values.length} RETURNING *`,
+      `UPDATE change_requests SET ${sets.join(', ')}
+       WHERE id = $${values.length} AND status = 'Draft' RETURNING *`,
       values
     );
-    if (!change) return res.status(404).json({ error: 'Change request not found' });
+    if (!change) return res.status(409).json({ error: 'Change was modified — reload and retry' });
     res.json({ change });
   } catch (err) {
     next(err);
@@ -182,23 +220,27 @@ async function approveChange(req, res, next) {
     if (change.status !== 'Submitted') {
       return res.status(400).json({ error: 'Change request is not pending approval' });
     }
+    // Separation of duties: someone other than the requester must approve
+    if (change.requester_id === req.user.userId) {
+      return res.status(403).json({ error: 'You cannot approve your own change request' });
+    }
 
-    // Upsert approval record
+    // Advance to Approved (conditional, so a concurrent approve/reject can't both win)
+    const {
+      rows: [updated],
+    } = await pool.query(
+      `UPDATE change_requests SET status = 'Approved', updated_at = NOW()
+       WHERE id = $1 AND status = 'Submitted' RETURNING *`,
+      [change.id]
+    );
+    if (!updated) return res.status(400).json({ error: 'Change request is not pending approval' });
+
     await pool.query(
       `INSERT INTO change_approvals (change_id, approver_id, status, comment, reviewed_at)
        VALUES ($1,$2,'approved',$3,NOW())
        ON CONFLICT (change_id, approver_id)
        DO UPDATE SET status='approved', comment=$3, reviewed_at=NOW()`,
       [change.id, req.user.userId, comment || null]
-    );
-
-    // Advance to Approved
-    const {
-      rows: [updated],
-    } = await pool.query(
-      `UPDATE change_requests SET status = 'Approved', updated_at = NOW()
-       WHERE id = $1 RETURNING *`,
-      [change.id]
     );
 
     // Notify requester
@@ -230,20 +272,21 @@ async function rejectChange(req, res, next) {
       return res.status(400).json({ error: 'Change request is not pending approval' });
     }
 
+    const {
+      rows: [updated],
+    } = await pool.query(
+      `UPDATE change_requests SET status = 'Rejected', updated_at = NOW()
+       WHERE id = $1 AND status = 'Submitted' RETURNING *`,
+      [change.id]
+    );
+    if (!updated) return res.status(400).json({ error: 'Change request is not pending approval' });
+
     await pool.query(
       `INSERT INTO change_approvals (change_id, approver_id, status, comment, reviewed_at)
        VALUES ($1,$2,'rejected',$3,NOW())
        ON CONFLICT (change_id, approver_id)
        DO UPDATE SET status='rejected', comment=$3, reviewed_at=NOW()`,
       [change.id, req.user.userId, comment || null]
-    );
-
-    const {
-      rows: [updated],
-    } = await pool.query(
-      `UPDATE change_requests SET status = 'Rejected', updated_at = NOW()
-       WHERE id = $1 RETURNING *`,
-      [change.id]
     );
 
     if (change.requester_id) {

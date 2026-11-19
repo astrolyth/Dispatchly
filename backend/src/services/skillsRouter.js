@@ -51,13 +51,15 @@ async function findBestAgent(ticket) {
         )
         FROM ticket_required_skills trs
         JOIN user_skills us ON us.skill_id = trs.skill_id AND us.user_id = u.id
+                           AND us.verified_at IS NOT NULL
         WHERE trs.ticket_id = $1
       ), -1) AS skill_score,
-      -- Count of matched required skills
+      -- Count of matched required skills (verified only — self-claimed skills don't route)
       COALESCE((
         SELECT COUNT(*)::int
         FROM ticket_required_skills trs
         JOIN user_skills us ON us.skill_id = trs.skill_id AND us.user_id = u.id
+                           AND us.verified_at IS NOT NULL
         WHERE trs.ticket_id = $1
       ), 0) AS skills_matched,
       -- Total required skills on ticket

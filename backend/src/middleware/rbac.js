@@ -8,7 +8,10 @@
  *       read:all      ⊇ read:team      ⊇ read:own
  *       update:all    ⊇ update:reports ⊇ update:own
  *       assign:all    ⊇ assign:reports ⊇ assign:own
- *       schedule:all  ⊇ schedule:reports ⊇ schedule:own
+ *
+ * Scope: the role_permissions table only governs routes that use requirePermission
+ * (departments, skills, agent-status, schedules). Tickets, KB, changes, problems,
+ * dashboard, users and on-call use requireRole + config/constants.js — edit those there.
  *
  * canAccess(req, resource, action) → boolean (no HTTP response, for use inside controllers)
  */
@@ -24,8 +27,6 @@ const IMPLIES = {
   'update:reports':   ['update:own'],
   'assign:all':       ['assign:reports',   'assign:own'],
   'assign:reports':   ['assign:own'],
-  'schedule:all':     ['schedule:reports', 'schedule:own'],   // virtual; handled below
-  'update:reports':   ['update:own'],
 };
 
 /**
@@ -61,12 +62,6 @@ async function getRolePermissions(role) {
   _roleCache.set(role, perms);
   _roleCacheExpiry.set(role, now + CACHE_TTL_MS);
   return perms;
-}
-
-/** Clear cached permissions (call after role_permissions changes) */
-function clearPermissionCache() {
-  _roleCache.clear();
-  _roleCacheExpiry.clear();
 }
 
 /**
@@ -135,11 +130,12 @@ async function canManageUser(requesterId, targetUserId, requesterRole) {
   // Walk up the reporting chain — is requester an ancestor of target?
   const { rows } = await pool.query(`
     WITH RECURSIVE hierarchy AS (
-      SELECT id, manager_id FROM users WHERE id = $1
+      SELECT id, manager_id, 0 AS depth FROM users WHERE id = $1
       UNION ALL
-      SELECT u.id, u.manager_id
+      SELECT u.id, u.manager_id, h.depth + 1
       FROM users u
       JOIN hierarchy h ON u.id = h.manager_id
+      WHERE h.depth < 10   -- stops a manager_id cycle (A→B→A) from recursing forever
     )
     SELECT 1 FROM hierarchy WHERE id = $2 LIMIT 1
   `, [targetUserId, requesterId]);
@@ -147,27 +143,8 @@ async function canManageUser(requesterId, targetUserId, requesterRole) {
   return rows.length > 0;
 }
 
-/**
- * Express middleware — ensure requester can manage the :userId param.
- */
-function requireCanManageUser() {
-  return async (req, res, next) => {
-    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
-    const targetId = parseInt(req.params.userId || req.params.id, 10);
-    try {
-      const ok = await canManageUser(req.user.userId, targetId, req.user.role);
-      if (!ok) return res.status(403).json({ error: 'You cannot manage this user' });
-      next();
-    } catch (err) {
-      next(err);
-    }
-  };
-}
-
 module.exports = {
   requirePermission,
   canAccess,
   canManageUser,
-  requireCanManageUser,
-  clearPermissionCache,
 };

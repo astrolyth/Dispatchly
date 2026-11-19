@@ -1,4 +1,5 @@
 const pool = require('../db/pool');
+const { withTransaction } = require('../db/tx');
 
 // ─── GET /api/problems ───────────────────────────────────────────────────────
 
@@ -160,68 +161,53 @@ async function resolveProblem(req, res, next) {
   try {
     const { resolution } = req.body;
 
-    const {
-      rows: [problem],
-    } = await pool.query('SELECT * FROM problems WHERE id = $1', [req.params.id]);
-    if (!problem) return res.status(404).json({ error: 'Problem not found' });
-    if (['Resolved', 'Closed'].includes(problem.status)) {
-      return res.status(400).json({ error: 'Problem is already resolved' });
+    // Problem + linked tickets + notifications resolve together or not at all.
+    // The status check is inside the UPDATE so a double click can't resolve twice.
+    const result = await withTransaction(async (client) => {
+      const {
+        rows: [updated],
+      } = await client.query(
+        `UPDATE problems
+           SET status = 'Resolved', resolution = $1, resolved_at = NOW(), updated_at = NOW()
+         WHERE id = $2 AND status NOT IN ('Resolved','Closed')
+         RETURNING *`,
+        [resolution || null, req.params.id]
+      );
+      if (!updated) return null;
+
+      const resolveMsg = `Auto-resolved: linked Problem #${updated.id} was resolved. ${resolution ? `Resolution: ${resolution}` : ''}`.trim();
+      const { rows: tickets } = await client.query(
+        `UPDATE tickets t
+           SET status = 'Resolved', resolution_notes = $1, resolved_at = NOW(), updated_at = NOW()
+         FROM problem_tickets pt
+         WHERE pt.ticket_id = t.id AND pt.problem_id = $2
+           AND t.status NOT IN ('Resolved','Closed')
+         RETURNING t.id, t.title, t.created_by_user_id`,
+        [resolveMsg, updated.id]
+      );
+
+      for (const t of tickets.filter((x) => x.created_by_user_id)) {
+        const shortTitle = t.title.slice(0, 60) + (t.title.length > 60 ? '…' : '');
+        await client.query(
+          `INSERT INTO notifications (user_id, ticket_id, type, message)
+           VALUES ($1,$2,'ticket_updated',$3)`,
+          [
+            t.created_by_user_id,
+            t.id,
+            `Your ticket "${shortTitle}" was resolved as part of Problem #${updated.id}`,
+          ]
+        );
+      }
+      return { problem: updated, resolvedTickets: tickets.length };
+    });
+
+    if (!result) {
+      const { rowCount } = await pool.query('SELECT 1 FROM problems WHERE id = $1', [req.params.id]);
+      return rowCount
+        ? res.status(400).json({ error: 'Problem is already resolved' })
+        : res.status(404).json({ error: 'Problem not found' });
     }
-
-    // Get linked tickets that aren't resolved/closed
-    const { rows: tickets } = await pool.query(
-      `SELECT t.id, t.title, t.created_by_user_id
-       FROM problem_tickets pt
-       JOIN tickets t ON t.id = pt.ticket_id
-       WHERE pt.problem_id = $1
-         AND t.status NOT IN ('Resolved','Closed')`,
-      [req.params.id]
-    );
-
-    // Auto-resolve linked tickets
-    const resolveMsg = `Auto-resolved: linked Problem #${problem.id} was resolved. ${resolution ? `Resolution: ${resolution}` : ''}`.trim();
-
-    await Promise.all(
-      tickets.map((t) =>
-        pool.query(
-          `UPDATE tickets
-             SET status = 'Resolved', resolution_notes = $1, resolved_at = NOW(), updated_at = NOW()
-           WHERE id = $2`,
-          [resolveMsg, t.id]
-        )
-      )
-    );
-
-    // Notify requesters of linked tickets
-    await Promise.all(
-      tickets
-        .filter((t) => t.created_by_user_id)
-        .map((t) => {
-          const shortTitle = t.title.slice(0, 60) + (t.title.length > 60 ? '…' : '');
-          return pool.query(
-            `INSERT INTO notifications (user_id, ticket_id, type, message)
-             VALUES ($1,$2,'ticket_updated',$3)`,
-            [
-              t.created_by_user_id,
-              t.id,
-              `Your ticket "${shortTitle}" was resolved as part of Problem #${problem.id}`,
-            ]
-          );
-        })
-    );
-
-    // Mark problem resolved
-    const {
-      rows: [updated],
-    } = await pool.query(
-      `UPDATE problems
-         SET status = 'Resolved', resolution = $1, resolved_at = NOW(), updated_at = NOW()
-       WHERE id = $2
-       RETURNING *`,
-      [resolution || null, problem.id]
-    );
-
-    res.json({ problem: updated, resolvedTickets: tickets.length });
+    res.json(result);
   } catch (err) {
     next(err);
   }

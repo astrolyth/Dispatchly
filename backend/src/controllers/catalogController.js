@@ -1,4 +1,5 @@
 const pool = require('../db/pool');
+const { withTransaction } = require('../db/tx');
 const { SLA_MINUTES, REQUESTER_ROLES } = require('../config/constants');
 
 // GET /api/catalog — list active catalog items (with fields)
@@ -74,58 +75,49 @@ async function submitCatalogItem(req, res) {
   const slaMinutes = SLA_MINUTES[priority] || SLA_MINUTES.P3;
   const initialStatus = item.requires_approval ? 'Pending Approval' : 'New';
 
-  const {
-    rows: [ticket],
-  } = await pool.query(
-    `INSERT INTO tickets
-       (title, description, type, priority, sla_minutes, status, source,
-        requester_name, requester_email,
-        created_by_user_id, catalog_item_id)
-     VALUES ($1,$2,'Service Request',$3,$4,$5,'catalog',$6,$7,$8,$9)
-     RETURNING *`,
-    [
-      item.name,
-      description.trim(),
-      priority,
-      slaMinutes,
-      initialStatus,
-      requesterName,
-      requesterEmail,
-      req.user.userId,
-      item.id,
-    ]
-  );
-
-  // Notify all managers + admins about the new service request
   const { rows: managers } = await pool.query(
     `SELECT id FROM users WHERE role IN ('admin','manager') AND is_active = TRUE`
   );
 
-  if (item.requires_approval) {
-    // Create approval record
-    await pool.query(`INSERT INTO approvals (ticket_id) VALUES ($1)`, [ticket.id]);
+  // Ticket, approval record and manager notifications land together or not at all
+  const ticket = await withTransaction(async (client) => {
+    const {
+      rows: [t],
+    } = await client.query(
+      `INSERT INTO tickets
+         (title, description, type, priority, sla_minutes, status, source,
+          requester_name, requester_email,
+          created_by_user_id, catalog_item_id)
+       VALUES ($1,$2,'Service Request',$3,$4,$5,'catalog',$6,$7,$8,$9)
+       RETURNING *`,
+      [
+        item.name,
+        description.trim(),
+        priority,
+        slaMinutes,
+        initialStatus,
+        requesterName,
+        requesterEmail,
+        req.user.userId,
+        item.id,
+      ]
+    );
 
-    const approvalMsg = `Approval needed: "${item.name}" requested by ${requesterName}.`;
-    await Promise.all(
-      managers.map((m) =>
-        pool.query(
-          `INSERT INTO notifications (user_id, ticket_id, type, message) VALUES ($1,$2,'approval_needed',$3)`,
-          [m.id, ticket.id, approvalMsg]
-        )
-      )
-    );
-  } else {
-    // No approval needed — still notify staff a new request arrived
-    const newMsg = `New service request: "${item.name}" submitted by ${requesterName}.`;
-    await Promise.all(
-      managers.map((m) =>
-        pool.query(
-          `INSERT INTO notifications (user_id, ticket_id, type, message) VALUES ($1,$2,'new_ticket',$3)`,
-          [m.id, ticket.id, newMsg]
-        )
-      )
-    );
-  }
+    if (item.requires_approval) {
+      await client.query(`INSERT INTO approvals (ticket_id) VALUES ($1)`, [t.id]);
+    }
+
+    const [type, msg] = item.requires_approval
+      ? ['approval_needed', `Approval needed: "${item.name}" requested by ${requesterName}.`]
+      : ['new_ticket', `New service request: "${item.name}" submitted by ${requesterName}.`];
+    for (const m of managers) {
+      await client.query(
+        `INSERT INTO notifications (user_id, ticket_id, type, message) VALUES ($1,$2,$3,$4)`,
+        [m.id, t.id, type, msg]
+      );
+    }
+    return t;
+  });
 
   res.status(201).json({ ticket });
 }

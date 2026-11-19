@@ -33,14 +33,15 @@ router.get('/:id', getTicket);
 router.patch(
   '/:id',
   requireRole('admin', 'manager', 'agent', 'technician', 'specialist'),
+  requireTicketAccess,
   updateTicket
 );
 
 // Escalate: agent-level and above only
 router.post('/:id/escalate', requireRole(...CAN_ESCALATE), escalateTicket);
 
-// Anyone authenticated can comment
-router.post('/:id/comments', addComment);
+// Anyone who can see the ticket can comment
+router.post('/:id/comments', requireTicketAccess, addComment);
 
 // Convert resolved ticket to KB: agent-level specialists
 router.post('/:id/convert-to-kb', requireRole(...CAN_CONVERT_KB), convertToKb);
@@ -50,7 +51,12 @@ router.get('/:id/problems', requireTicketAccess, getTicketProblems);
 
 // Time tracking
 router.get('/:id/time', requireTicketAccess, getTimeEntries);
-router.post('/:id/time', requireRole('admin', 'manager', 'agent', 'technician', 'specialist'), logTime);
+router.post(
+  '/:id/time',
+  requireRole('admin', 'manager', 'agent', 'technician', 'specialist'),
+  requireTicketAccess,
+  logTime
+);
 
 // Assignment accept / decline — technicians only
 router.post('/:id/accept', requireRole('technician', 'agent', 'specialist'), acceptAssignment);

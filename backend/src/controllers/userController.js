@@ -2,7 +2,28 @@ const bcrypt = require('bcryptjs');
 const pool = require('../db/pool');
 const { ROLES } = require('../config/constants');
 
+const { updateAgentStatus } = require('../services/scheduleManager');
+
 const SAFE_FIELDS = 'id, email, name, role, department, is_active, availability_status, skills, created_at, updated_at';
+
+/**
+ * True when removing admin rights from userId would leave no active admin.
+ * shortcut: check-then-write without a lock; two admins demoting each other at the
+ * same instant could both pass. Fine for a handful of admins; use SERIALIZABLE if that changes.
+ */
+async function isLastActiveAdmin(userId) {
+  const {
+    rows: [target],
+  } = await pool.query('SELECT role, is_active FROM users WHERE id = $1', [userId]);
+  if (!target || target.role !== 'admin' || !target.is_active) return false;
+  const {
+    rows: [{ others }],
+  } = await pool.query(
+    `SELECT COUNT(*)::int AS others FROM users WHERE role = 'admin' AND is_active = TRUE AND id <> $1`,
+    [userId]
+  );
+  return others === 0;
+}
 
 // ─── GET /api/users ───────────────────────────────────────────────────────────
 
@@ -95,6 +116,12 @@ const updateUser = async (req, res, next) => {
 
     if (sets.length === 0) return res.status(400).json({ error: 'No valid fields to update' });
 
+    const losesAdmin =
+      (req.body.role !== undefined && req.body.role !== 'admin') || req.body.is_active === false;
+    if (losesAdmin && (await isLastActiveAdmin(req.params.id))) {
+      return res.status(400).json({ error: 'Cannot remove the last active admin account' });
+    }
+
     sets.push(`updated_at = $${values.length + 1}`);
     values.push(new Date());
     values.push(req.params.id);
@@ -109,19 +136,6 @@ const updateUser = async (req, res, next) => {
     );
 
     if (!user) return res.status(404).json({ error: 'User not found' });
-
-    // Prevent demoting the last admin
-    if (req.body.role && req.body.role !== 'admin') {
-      const {
-        rows: [{ count }],
-      } = await pool.query(`SELECT COUNT(*) FROM users WHERE role = 'admin' AND is_active = TRUE`);
-      if (parseInt(count, 10) === 0) {
-        // Revert — can't remove the last admin
-        await pool.query(`UPDATE users SET role = 'admin' WHERE id = $1`, [req.params.id]);
-        return res.status(400).json({ error: 'Cannot remove the last admin account' });
-      }
-    }
-
     res.json(user);
   } catch (err) {
     next(err);
@@ -135,6 +149,9 @@ const deactivateUser = async (req, res, next) => {
     // Cannot deactivate yourself
     if (parseInt(req.params.id, 10) === req.user.userId) {
       return res.status(400).json({ error: 'Cannot deactivate your own account' });
+    }
+    if (await isLastActiveAdmin(req.params.id)) {
+      return res.status(400).json({ error: 'Cannot deactivate the last active admin account' });
     }
 
     const {
@@ -180,14 +197,17 @@ const updateAvailability = async (req, res, next) => {
     if (!VALID.includes(availability_status)) {
       return res.status(400).json({ error: `availability_status must be one of: ${VALID.join(', ')}` });
     }
+    // Go through the status engine so current_status (used by routing) and the log stay in sync
+    await updateAgentStatus(
+      req.user.userId,
+      availability_status,
+      req.user.userId,
+      false,
+      'Set from on-call page'
+    );
     const {
       rows: [user],
-    } = await pool.query(
-      `UPDATE users SET availability_status = $1, updated_at = NOW()
-       WHERE id = $2
-       RETURNING ${SAFE_FIELDS}`,
-      [availability_status, req.user.userId]
-    );
+    } = await pool.query(`SELECT ${SAFE_FIELDS} FROM users WHERE id = $1`, [req.user.userId]);
     res.json(user);
   } catch (err) {
     next(err);

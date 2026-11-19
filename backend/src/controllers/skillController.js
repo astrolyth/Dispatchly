@@ -62,7 +62,8 @@ const updateSkill = async (req, res, next) => {
 
 const getUserSkills = async (req, res, next) => {
   try {
-    const userId = req.params.userId || req.user.userId;
+    // The Skills page asks for /users/me
+    const userId = req.params.userId === 'me' ? req.user.userId : req.params.userId;
     const { rows } = await pool.query(`
       SELECT
         us.*,
@@ -92,13 +93,17 @@ const assignSkillToUser = async (req, res, next) => {
       return res.status(403).json({ error: 'Cannot assign skills to this user' });
     }
 
+    // Self-claimed skills start unverified; a manager/admin setting it counts as verification.
+    // Routing only trusts verified skills, so agents can't inflate themselves into tickets.
+    const verifier = canSelf ? null : req.user.userId;
     const { rows: [us] } = await pool.query(`
-      INSERT INTO user_skills (user_id, skill_id, proficiency_level, notes)
-      VALUES ($1,$2,$3,$4)
+      INSERT INTO user_skills (user_id, skill_id, proficiency_level, notes, verified_by, verified_at)
+      VALUES ($1,$2,$3,$4,$5::int, CASE WHEN $5::int IS NULL THEN NULL ELSE NOW() END)
       ON CONFLICT (user_id, skill_id)
-      DO UPDATE SET proficiency_level = $3, notes = $4, updated_at = NOW()
+      DO UPDATE SET proficiency_level = $3, notes = $4, updated_at = NOW(),
+                    verified_by = EXCLUDED.verified_by, verified_at = EXCLUDED.verified_at
       RETURNING *
-    `, [targetUserId, skill_id, proficiency_level, notes || null]);
+    `, [targetUserId, skill_id, proficiency_level, notes || null, verifier]);
     res.status(201).json({ userSkill: us });
   } catch (err) { next(err); }
 };
@@ -106,6 +111,14 @@ const assignSkillToUser = async (req, res, next) => {
 const verifyUserSkill = async (req, res, next) => {
   try {
     const { id } = req.params; // user_skills.id
+    const { rows: [existing] } = await pool.query('SELECT user_id FROM user_skills WHERE id = $1', [id]);
+    if (!existing) return res.status(404).json({ error: 'Not found' });
+    if (existing.user_id === req.user.userId) {
+      return res.status(403).json({ error: 'You cannot verify your own skill' });
+    }
+    if (!(await canManageUser(req.user.userId, existing.user_id, req.user.role))) {
+      return res.status(403).json({ error: 'You can only verify skills of your reports' });
+    }
     const { rows: [us] } = await pool.query(`
       UPDATE user_skills
       SET verified_by = $1, verified_at = NOW()

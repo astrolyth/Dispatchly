@@ -11,10 +11,40 @@ const COOKIE_OPTIONS = {
   path: '/',
 };
 
+// ─── Brute-force guard: 10 failed logins per IP per 15 minutes ───────────────
+// shortcut: in-memory and per process; move to Redis/DB once more than one API process runs.
+const FAIL_LIMIT = 10;
+const WINDOW_MS = 15 * 60 * 1000;
+const failures = new Map(); // ip → { count, resetAt }
+
+function isBlocked(ip) {
+  const f = failures.get(ip);
+  if (!f) return false;
+  if (Date.now() > f.resetAt) {
+    failures.delete(ip);
+    return false;
+  }
+  return f.count >= FAIL_LIMIT;
+}
+
+function recordFailure(ip) {
+  const now = Date.now();
+  const f = failures.get(ip);
+  if (!f || now > f.resetAt) failures.set(ip, { count: 1, resetAt: now + WINDOW_MS });
+  else f.count++;
+  // Keep memory bounded under a spray from many IPs
+  if (failures.size > 10000) {
+    for (const [k, v] of failures) if (now > v.resetAt) failures.delete(k);
+  }
+}
+
 // ─── POST /api/auth/login ─────────────────────────────────────────────────────
 
 const login = async (req, res, next) => {
   try {
+    if (isBlocked(req.ip)) {
+      return res.status(429).json({ error: 'Too many failed logins — try again in 15 minutes' });
+    }
     const { email, password } = req.body;
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
@@ -26,10 +56,12 @@ const login = async (req, res, next) => {
       email.trim().toLowerCase(),
     ]);
 
-    if (!user) return res.status(401).json({ error: 'Invalid email or password' });
-
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) return res.status(401).json({ error: 'Invalid email or password' });
+    const valid = user && (await bcrypt.compare(password, user.password_hash));
+    if (!valid) {
+      recordFailure(req.ip);
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+    failures.delete(req.ip);
 
     const payload = {
       userId: user.id,

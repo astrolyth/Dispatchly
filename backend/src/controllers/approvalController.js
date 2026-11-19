@@ -1,4 +1,5 @@
 const pool = require('../db/pool');
+const { withTransaction } = require('../db/tx');
 
 // GET /api/tickets/:id/approval — get approval record for a ticket
 async function getApproval(req, res) {
@@ -14,97 +15,73 @@ async function getApproval(req, res) {
   res.json({ approval: approval || null });
 }
 
-// POST /api/tickets/:id/approve
-async function approveTicket(req, res) {
+/**
+ * Move a 'Pending Approval' ticket to its next state, record the decision and notify
+ * the requester — all in one transaction. The status check is part of the UPDATE, so
+ * two managers clicking approve/reject at once can't both win.
+ */
+async function decide(req, res, { approvalStatus, ticketSql, ticketParams, message }) {
   const { comment } = req.body;
 
-  const {
-    rows: [ticket],
-  } = await pool.query(`SELECT * FROM tickets WHERE id = $1`, [req.params.id]);
-  if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
-  if (ticket.status !== 'Pending Approval') {
-    return res.status(400).json({ error: 'Ticket is not pending approval' });
-  }
+  const ticket = await withTransaction(async (client) => {
+    const {
+      rows: [t],
+    } = await client.query(ticketSql, ticketParams);
+    if (!t) return null;
 
-  // Update approval record
-  await pool.query(
-    `UPDATE approvals
-     SET status = 'approved', approver_id = $1, comment = $2, resolved_at = NOW()
-     WHERE ticket_id = $3`,
-    [req.user.userId, comment || null, ticket.id]
-  );
-
-  // Advance ticket to New
-  await pool.query(`UPDATE tickets SET status = 'New' WHERE id = $1`, [ticket.id]);
-
-  // Notify the requester
-  if (ticket.created_by_user_id) {
-    await pool.query(
-      `INSERT INTO notifications (user_id, ticket_id, type, message)
-       VALUES ($1,$2,'approval_resolved',$3)`,
-      [
-        ticket.created_by_user_id,
-        ticket.id,
-        `Your request "${ticket.title}" was approved. Work will begin shortly.`,
-      ]
+    await client.query(
+      `UPDATE approvals
+       SET status = $1, approver_id = $2, comment = $3, resolved_at = NOW()
+       WHERE ticket_id = $4`,
+      [approvalStatus, req.user.userId, comment || null, t.id]
     );
-  }
 
-  const {
-    rows: [updated],
-  } = await pool.query(`SELECT * FROM tickets WHERE id = $1`, [ticket.id]);
-  res.json({ ticket: updated });
+    if (t.created_by_user_id) {
+      await client.query(
+        `INSERT INTO notifications (user_id, ticket_id, type, message)
+         VALUES ($1,$2,'approval_resolved',$3)`,
+        [t.created_by_user_id, t.id, message(t)]
+      );
+    }
+    return t;
+  });
+
+  if (!ticket) {
+    const { rowCount } = await pool.query('SELECT 1 FROM tickets WHERE id = $1', [req.params.id]);
+    return rowCount
+      ? res.status(400).json({ error: 'Ticket is not pending approval' })
+      : res.status(404).json({ error: 'Ticket not found' });
+  }
+  res.json({ ticket });
 }
 
-// POST /api/tickets/:id/reject
+// POST /api/tickets/:id/approve — advance ticket to New
+async function approveTicket(req, res) {
+  return decide(req, res, {
+    approvalStatus: 'approved',
+    ticketSql: `UPDATE tickets SET status = 'New', updated_at = NOW()
+                WHERE id = $1 AND status = 'Pending Approval' RETURNING *`,
+    ticketParams: [req.params.id],
+    message: (t) => `Your request "${t.title}" was approved. Work will begin shortly.`,
+  });
+}
+
+// POST /api/tickets/:id/reject — close ticket with a rejection note
 async function rejectTicket(req, res) {
   const { comment } = req.body;
-
-  const {
-    rows: [ticket],
-  } = await pool.query(`SELECT * FROM tickets WHERE id = $1`, [req.params.id]);
-  if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
-  if (ticket.status !== 'Pending Approval') {
-    return res.status(400).json({ error: 'Ticket is not pending approval' });
-  }
-
-  // Update approval record
-  await pool.query(
-    `UPDATE approvals
-     SET status = 'rejected', approver_id = $1, comment = $2, resolved_at = NOW()
-     WHERE ticket_id = $3`,
-    [req.user.userId, comment || null, ticket.id]
-  );
-
-  // Close the ticket with rejection note
   const rejectionNote = comment
     ? `Request rejected by ${req.user.name}: ${comment}`
     : `Request rejected by ${req.user.name}.`;
 
-  await pool.query(
-    `UPDATE tickets
-     SET status = 'Closed', resolution_notes = $1, closed_at = NOW()
-     WHERE id = $2`,
-    [rejectionNote, ticket.id]
-  );
-
-  // Notify the requester
-  if (ticket.created_by_user_id) {
-    await pool.query(
-      `INSERT INTO notifications (user_id, ticket_id, type, message)
-       VALUES ($1,$2,'approval_resolved',$3)`,
-      [
-        ticket.created_by_user_id,
-        ticket.id,
-        `Your request "${ticket.title}" was not approved. ${comment ? `Reason: ${comment}` : ''}`,
-      ]
-    );
-  }
-
-  const {
-    rows: [updated],
-  } = await pool.query(`SELECT * FROM tickets WHERE id = $1`, [ticket.id]);
-  res.json({ ticket: updated });
+  return decide(req, res, {
+    approvalStatus: 'rejected',
+    ticketSql: `UPDATE tickets
+                SET status = 'Closed', resolution_notes = $2, closed_at = NOW(), updated_at = NOW()
+                WHERE id = $1 AND status = 'Pending Approval' RETURNING *`,
+    ticketParams: [req.params.id, rejectionNote],
+    message: (t) =>
+      `Your request "${t.title}" was not approved. ${comment ? `Reason: ${comment}` : ''}`.trim(),
+  });
 }
 
 module.exports = { getApproval, approveTicket, rejectTicket };

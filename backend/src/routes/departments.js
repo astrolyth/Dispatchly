@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
-const { requirePermission, requireCanManageUser } = require('../middleware/rbac');
+const { requirePermission } = require('../middleware/rbac');
 const {
   getDepartments, getDepartment, createDepartment, updateDepartment, deleteDepartment,
   getTeams, getTeam, createTeam, updateTeam,

@@ -6,6 +6,7 @@ const { notify, notifyMany } = require('../services/notifier');
 const { autoAssign } = require('../services/skillsRouter');
 const { onTicketResolved } = require('../services/scheduleManager');
 const { canViewTicket } = require('../utils/ticketAccess');
+const { withTransaction } = require('../db/tx');
 
 /**
  * Route guard for /api/tickets/:id/* sub-resources: 404 if missing, 403 if not visible.
@@ -492,7 +493,7 @@ const updateTicket = async (req, res, next) => {
  */
 const escalateTicket = async (req, res, next) => {
   try {
-    const { reason, escalated_to_team, escalated_by } = req.body;
+    const { reason, escalated_to_team } = req.body;
     if (!reason) return res.status(400).json({ error: 'Escalation reason is required' });
 
     const {
@@ -505,25 +506,23 @@ const escalateTicket = async (req, res, next) => {
 
     const team = escalated_to_team || ESCALATION_TEAMS[ticket.category] || 'Tier 2 Support';
 
-    const [
-      {
-        rows: [escalation],
-      },
-      {
-        rows: [updated],
-      },
-    ] = await Promise.all([
-      pool.query(
+    const { escalation, updated } = await withTransaction(async (client) => {
+      const {
+        rows: [esc],
+      } = await client.query(
         `INSERT INTO escalations (ticket_id, reason, escalated_to_team, escalated_by)
          VALUES ($1,$2,$3,$4) RETURNING *`,
-        [ticket.id, reason, team, escalated_by || req.user.name || 'Tier 1 Agent']
-      ),
-      pool.query(
+        [ticket.id, reason, team, req.user.name]
+      );
+      const {
+        rows: [t],
+      } = await client.query(
         `UPDATE tickets SET status = 'Escalated', updated_at = NOW()
          WHERE id = $1 RETURNING *`,
         [ticket.id]
-      ),
-    ]);
+      );
+      return { escalation: esc, updated: t };
+    });
 
     // Notify requester + previously assigned agent
     const shortTitle = ticket.title.slice(0, 60) + (ticket.title.length > 60 ? '…' : '');
@@ -575,7 +574,7 @@ const addComment = async (req, res, next) => {
       pool.query(
         `INSERT INTO ticket_comments (ticket_id, author, body, is_internal)
          VALUES ($1,$2,$3,$4) RETURNING *`,
-        [ticket.id, req.body.author || userName || 'Agent', body, internal]
+        [ticket.id, userName, body, internal]
       ),
       // Auto-advance New → In Progress on first staff comment
       ticket.status === 'New' && !REQUESTER_ROLES.includes(role)
@@ -647,44 +646,43 @@ const convertToKb = async (req, res, next) => {
         .json({ error: 'Only resolved tickets can be converted to KB articles' });
     }
 
-    const { title, symptoms, resolution_steps, tags = [], author } = req.body;
+    const { title, symptoms, resolution_steps, tags = [] } = req.body;
 
-    const {
-      rows: [article],
-    } = await pool.query(
-      `INSERT INTO kb_articles
-         (title, symptoms, resolution_steps, category, author, is_published, source_ticket_id)
-       VALUES ($1,$2,$3,$4,$5,TRUE,$6)
-       RETURNING *`,
-      [
-        title || ticket.title,
-        symptoms || ticket.description,
-        resolution_steps || ticket.resolution_notes || '',
-        ticket.category,
-        author || req.user.name || 'Agent',
-        ticket.id,
-      ]
-    );
+    // Article, tags and the ticket link land together or not at all
+    const article = await withTransaction(async (client) => {
+      const {
+        rows: [a],
+      } = await client.query(
+        `INSERT INTO kb_articles
+           (title, symptoms, resolution_steps, category, author, is_published, source_ticket_id)
+         VALUES ($1,$2,$3,$4,$5,TRUE,$6)
+         RETURNING *`,
+        [
+          title || ticket.title,
+          symptoms || ticket.description,
+          resolution_steps || ticket.resolution_notes || '',
+          ticket.category,
+          req.user.name,
+          ticket.id,
+        ]
+      );
 
-    if (tags.length > 0) {
-      const tagValues = tags.map((_, i) => `($1, $${i + 2})`).join(', ');
-      await pool.query(`INSERT INTO kb_tags (article_id, tag) VALUES ${tagValues}`, [
-        article.id,
-        ...tags.map((t) => t.trim()),
-      ]);
-    }
+      if (tags.length > 0) {
+        const tagValues = tags.map((_, i) => `($1, $${i + 2})`).join(', ');
+        await client.query(`INSERT INTO kb_tags (article_id, tag) VALUES ${tagValues}`, [
+          a.id,
+          ...tags.map((t) => t.trim()),
+        ]);
+      }
 
-    await pool.query('UPDATE tickets SET kb_article_id = $1, updated_at = NOW() WHERE id = $2', [
-      article.id,
-      ticket.id,
-    ]);
+      await client.query(
+        'UPDATE tickets SET kb_article_id = $1, updated_at = NOW() WHERE id = $2',
+        [a.id, ticket.id]
+      );
+      return a;
+    });
 
-    const { rows: insertedTags } = await pool.query(
-      'SELECT tag FROM kb_tags WHERE article_id = $1',
-      [article.id]
-    );
-
-    res.status(201).json({ ...article, tags: insertedTags.map((t) => t.tag) });
+    res.status(201).json({ ...article, tags: tags.map((t) => t.trim()) });
   } catch (err) {
     next(err);
   }

@@ -119,7 +119,8 @@ const getArticle = async (req, res, next) => {
  */
 const createArticle = async (req, res, next) => {
   try {
-    const { title, symptoms, resolution_steps, category, author = 'Agent', tags = [] } = req.body;
+    const { title, symptoms, resolution_steps, category, tags = [] } = req.body;
+    const author = req.user.name;
 
     const {
       rows: [article],
