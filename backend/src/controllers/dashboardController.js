@@ -361,9 +361,47 @@ const getBusinessHours = async (req, res, next) => {
 
 // ─── PATCH /api/dashboard/business-hours ─────────────────────────────────────
 
+// Returns an error message, or null when the business hours payload is valid.
+function businessHoursError({ start_hour, end_hour, work_days, timezone }) {
+  if (!Number.isInteger(start_hour) || !Number.isInteger(end_hour)
+      || start_hour < 0 || end_hour > 24 || end_hour <= start_hour) {
+    return 'Hours must be whole numbers with 0 ≤ start < end ≤ 24';
+  }
+  if (!Array.isArray(work_days) || work_days.length === 0
+      || !work_days.every((d) => Number.isInteger(d) && d >= 0 && d <= 6)) {
+    return 'Pick at least one working day';
+  }
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: timezone });
+  } catch {
+    return `Unknown time zone: ${timezone}`;
+  }
+  return null;
+}
+
+// Returns an error message, or null. Only checks fields that are present (works for PATCH).
+function slaDefinitionError(body) {
+  if (body.type !== undefined && !['SLA', 'OLA', 'UC'].includes(body.type)) {
+    return 'type must be SLA, OLA or UC';
+  }
+  if (body.target_minutes !== undefined
+      && !(Number.isInteger(body.target_minutes) && body.target_minutes > 0)) {
+    return 'target_minutes must be a positive whole number';
+  }
+  for (const key of ['priority_filter', 'category_filter']) {
+    const v = body[key];
+    if (v != null && !(Array.isArray(v) && v.every((x) => typeof x === 'string'))) {
+      return `${key} must be a list of strings`;
+    }
+  }
+  return null;
+}
+
 const updateBusinessHours = async (req, res, next) => {
   try {
     const { start_hour, end_hour, work_days, timezone } = req.body;
+    const invalid = businessHoursError(req.body);
+    if (invalid) return res.status(400).json({ error: invalid });
     const { rows: [config] } = await pool.query(
       `INSERT INTO business_hours_config (id, start_hour, end_hour, work_days, timezone, updated_at)
        VALUES (1, $1, $2, $3, $4, NOW())
@@ -420,6 +458,8 @@ const createSlaDefinition = async (req, res, next) => {
     if (!name || !target_minutes) {
       return res.status(400).json({ error: 'name and target_minutes are required' });
     }
+    const invalid = slaDefinitionError(req.body);
+    if (invalid) return res.status(400).json({ error: invalid });
 
     const { rows: [def] } = await pool.query(
       `INSERT INTO sla_definitions
@@ -441,6 +481,8 @@ const updateSlaDefinition = async (req, res, next) => {
   try {
     const ALLOWED = ['name','type','description','target_minutes','priority_filter',
                      'category_filter','applies_business_hours','is_active'];
+    const invalid = slaDefinitionError(req.body);
+    if (invalid) return res.status(400).json({ error: invalid });
     const sets = [], vals = [];
     for (const key of ALLOWED) {
       if (req.body[key] !== undefined) {
@@ -463,6 +505,8 @@ const updateSlaDefinition = async (req, res, next) => {
 };
 
 module.exports = {
+  businessHoursError,
+  slaDefinitionError,
   getDashboard,
   getAnalytics,
   getBusinessHours,

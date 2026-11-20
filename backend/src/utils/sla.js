@@ -11,7 +11,36 @@ const DEFAULT_BIZ_HOURS = {
   startHour: 9,
   endHour: 17,
   workDays: [1, 2, 3, 4, 5], // Mon–Fri
+  timezone: 'UTC',
 };
+
+// ─── Wall-clock time in a given IANA time zone ───────────────────────────────
+
+const WEEKDAYS = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+const _formatters = new Map(); // tz → Intl.DateTimeFormat (construction is slow; reuse)
+
+function formatterFor(timeZone) {
+  const tz = timeZone || 'UTC';
+  if (!_formatters.has(tz)) {
+    const opts = {
+      weekday: 'short', hour: 'numeric', minute: 'numeric', second: 'numeric', hourCycle: 'h23',
+    };
+    let fmt;
+    try {
+      fmt = new Intl.DateTimeFormat('en-US', { ...opts, timeZone: tz });
+    } catch {
+      fmt = new Intl.DateTimeFormat('en-US', { ...opts, timeZone: 'UTC' }); // invalid tz string
+    }
+    _formatters.set(tz, fmt);
+  }
+  return _formatters.get(tz);
+}
+
+/** Local { day (0=Sun), hour, minute, second } of `date` in `timeZone`. Bad zones fall back to UTC. */
+function localTime(timeZone, date = new Date()) {
+  const p = Object.fromEntries(formatterFor(timeZone).formatToParts(date).map((x) => [x.type, x.value]));
+  return { day: WEEKDAYS[p.weekday], hour: Number(p.hour), minute: Number(p.minute), second: Number(p.second) };
+}
 
 // Module-level cache — updated by loadBusinessHoursConfig()
 let _bizHoursConfig = { ...DEFAULT_BIZ_HOURS };
@@ -26,6 +55,7 @@ function setBusinessHoursConfig(config) {
       startHour: config.start_hour ?? DEFAULT_BIZ_HOURS.startHour,
       endHour:   config.end_hour   ?? DEFAULT_BIZ_HOURS.endHour,
       workDays:  config.work_days  ?? DEFAULT_BIZ_HOURS.workDays,
+      timezone:  config.timezone   ?? DEFAULT_BIZ_HOURS.timezone,
     };
   }
 }
@@ -40,7 +70,9 @@ function getBusinessHoursConfig() {
  * Calculate how many business minutes have elapsed between two dates.
  * Only counts minutes that fall within configured business hours.
  *
- * O(N days) — efficient even for P4 tickets spanning multiple days.
+ * Hours and days are read in config.timezone, not the server clock. Walks in local-hour
+ * steps (re-reading the wall clock each step), so DST shifts and :30 zones stay correct.
+ * Cost is ~one step per off-hour; fine for tickets open weeks, not years.
  *
  * @param {Date|string} start
  * @param {Date|string} end
@@ -48,54 +80,28 @@ function getBusinessHoursConfig() {
  * @returns {number} Elapsed business minutes
  */
 function businessMinutesElapsed(start, end, config = _bizHoursConfig) {
-  const { startHour, endHour, workDays } = config;
-  let total = 0;
-  let current = new Date(start);
-  const endDate = new Date(end);
+  const { startHour, endHour, workDays, timezone } = config;
+  const HOUR = 3600000;
+  let t = new Date(start).getTime();
+  const endT = new Date(end).getTime();
+  let totalMs = 0;
 
-  // Safety valve: if somehow end < start, return 0
-  if (endDate <= current) return 0;
+  while (t < endT) {
+    const { day, hour, minute, second } = localTime(timezone, new Date(t));
+    const intoHour = (minute * 60 + second) * 1000 + (t % 1000);
+    const hourStart = t - intoHour; // start of the current local hour
 
-  while (current < endDate) {
-    const dayOfWeek = current.getDay();
-
-    // Not a work day — skip to next day at business start
-    if (!workDays.includes(dayOfWeek)) {
-      current.setDate(current.getDate() + 1);
-      current.setHours(startHour, 0, 0, 0);
-      continue;
+    if (workDays.includes(day) && hour >= startHour && hour < endHour) {
+      // Inside business hours — count up to local closing time (or end)
+      const segEnd = Math.min(endT, hourStart + (endHour - hour) * HOUR);
+      totalMs += segEnd - t;
+      t = segEnd;
+    } else {
+      t = hourStart + HOUR; // jump to the next local hour and re-check
     }
-
-    const bizStart = new Date(current);
-    bizStart.setHours(startHour, 0, 0, 0);
-
-    const bizEnd = new Date(current);
-    bizEnd.setHours(endHour, 0, 0, 0);
-
-    if (current < bizStart) {
-      // Before business hours today — jump to start
-      current = new Date(bizStart);
-      continue;
-    }
-
-    if (current >= bizEnd) {
-      // After business hours today — jump to next day
-      current.setDate(current.getDate() + 1);
-      current.setHours(startHour, 0, 0, 0);
-      continue;
-    }
-
-    // We're inside business hours — count up to the earlier of bizEnd or endDate
-    const segmentEnd = endDate < bizEnd ? endDate : bizEnd;
-    total += (segmentEnd - current) / 60000; // ms → minutes
-
-    // Advance past the end of today's business hours
-    current = new Date(bizEnd);
-    current.setDate(current.getDate() + 1);
-    current.setHours(startHour, 0, 0, 0);
   }
 
-  return total;
+  return totalMs / 60000;
 }
 
 // ─── Priorities that respect business hours ───────────────────────────────────
@@ -158,10 +164,8 @@ function computeSla(ticket, bizConfig) {
 /**
  * Check if the current moment is within business hours.
  */
-function isCurrentlyInBusinessHours(config = _bizHoursConfig) {
-  const now = new Date();
-  const day = now.getDay();
-  const hour = now.getHours();
+function isCurrentlyInBusinessHours(config = _bizHoursConfig, now = new Date()) {
+  const { day, hour } = localTime(config.timezone, now);
   return (
     config.workDays.includes(day) &&
     hour >= config.startHour &&
@@ -219,6 +223,7 @@ module.exports = {
   enrich,
   businessMinutesElapsed,
   isCurrentlyInBusinessHours,
+  localTime,
   setBusinessHoursConfig,
   getBusinessHoursConfig,
   DEFAULT_BIZ_HOURS,

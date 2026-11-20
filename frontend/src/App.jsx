@@ -22,6 +22,7 @@ import OrgPage, { orgLoader } from './pages/OrgPage';
 import AgentStatusPage, { agentStatusLoader } from './pages/AgentStatusPage';
 import SkillsPage, { skillsLoader } from './pages/SkillsPage';
 import SchedulesPage, { schedulesLoader } from './pages/SchedulesPage';
+import SlaSettingsPage, { slaSettingsAction, slaSettingsLoader } from './pages/SlaSettingsPage';
 
 /**
  * Root loader — fetches the current user.
@@ -138,6 +139,14 @@ const router = createBrowserRouter([
 
       // Work schedules
       { path: 'schedules', element: <SchedulesPage />, loader: schedulesLoader },
+
+      // Admin-only: business hours + SLA definitions
+      {
+        path: 'admin/sla',
+        element: <SlaSettingsPage />,
+        loader: slaSettingsLoader,
+        action: slaSettingsAction,
+      },
     ],
   },
 ]);

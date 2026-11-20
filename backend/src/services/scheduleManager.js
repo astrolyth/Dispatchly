@@ -25,6 +25,7 @@
 const cron = require('node-cron');
 const pool = require('../db/pool');
 const { notify } = require('./notifier');
+const { localTime } = require('../utils/sla');
 
 // Statuses where shift auto-transitions should NOT apply
 // (on_call is managed separately by the on-call schedule)
@@ -88,23 +89,9 @@ async function updateAgentStatus(userId, newStatus, setByUserId = null, isAutoma
 
 // ─── Shift hours are in the schedule's own time zone, not the server's ───────
 
-const WEEKDAYS = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-
-function localDayHour(timeZone, now = new Date()) {
-  const opts = { weekday: 'short', hour: 'numeric', hourCycle: 'h23' };
-  let fmt;
-  try {
-    fmt = new Intl.DateTimeFormat('en-US', { ...opts, timeZone: timeZone || 'UTC' });
-  } catch {
-    fmt = new Intl.DateTimeFormat('en-US', { ...opts, timeZone: 'UTC' }); // invalid tz string
-  }
-  const parts = Object.fromEntries(fmt.formatToParts(now).map((p) => [p.type, p.value]));
-  return { day: WEEKDAYS[parts.weekday], hour: Number(parts.hour) };
-}
-
 /** Is `now` inside this work_schedules row's shift? */
 function inShiftNow(sched, now = new Date()) {
-  const { day, hour } = localDayHour(sched.timezone, now);
+  const { day, hour } = localTime(sched.timezone, now);
   const workDays = sched.work_days || [1, 2, 3, 4, 5];
   return workDays.includes(day) && hour >= sched.start_hour && hour < sched.end_hour;
 }
