@@ -17,7 +17,8 @@
     "lint": "biome lint ./src",
     "format": "biome format ./src --write",
     "check": "biome check ./src",
-    "test": "node --test"
+    "test": "node --test 'src/**/*.test.js'",
+    "test:int": "node --test --test-concurrency=1 'int/**/*.int.test.js'"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",

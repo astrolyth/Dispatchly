@@ -14,15 +14,6 @@ const path = require('node:path');
 
 const MIGRATIONS_DIR = path.resolve(__dirname, '../../migrations');
 
-// Standalone pool for the CLI — closed after run
-const pool = new Pool({
-  host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT || '5432', 10),
-  database: process.env.DB_NAME || 'dispatchly',
-  user: process.env.DB_USER || 'postgres',
-  password: process.env.DB_PASSWORD || '',
-});
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 async function ensureMigrationsTable(client) {
@@ -49,7 +40,7 @@ async function getAppliedMigrations(client) {
 
 // ─── Commands ────────────────────────────────────────────────────────────────
 
-async function migrateUp() {
+async function migrateUp(pool) {
   const client = await pool.connect();
   try {
     await ensureMigrationsTable(client);
@@ -59,7 +50,7 @@ async function migrateUp() {
 
     if (pending.length === 0) {
       console.log('✓ Nothing to migrate — already up to date.');
-      return;
+      return 0;
     }
 
     for (const file of pending) {
@@ -78,12 +69,13 @@ async function migrateUp() {
       }
     }
     console.log(`\nDone — ${pending.length} migration(s) applied.`);
+    return pending.length;
   } finally {
     client.release();
   }
 }
 
-async function migrateDown() {
+async function migrateDown(pool) {
   const client = await pool.connect();
   try {
     await ensureMigrationsTable(client);
@@ -114,7 +106,7 @@ async function migrateDown() {
   }
 }
 
-async function migrateStatus() {
+async function migrateStatus(pool) {
   const client = await pool.connect();
   try {
     await ensureMigrationsTable(client);
@@ -136,18 +128,31 @@ async function migrateStatus() {
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
-const command = process.argv[2] || 'up';
-const commands = { up: migrateUp, down: migrateDown, status: migrateStatus };
+module.exports = { migrateUp };
 
-if (!commands[command]) {
-  console.error(`Unknown command: ${command}. Use: up | down | status`);
-  process.exit(1);
-}
+if (require.main === module) {
+  const command = process.argv[2] || 'up';
+  const commands = { up: migrateUp, down: migrateDown, status: migrateStatus };
 
-commands[command]()
-  .then(() => pool.end())
-  .then(() => process.exit(0))
-  .catch((err) => {
-    console.error(err.message);
-    pool.end().finally(() => process.exit(1));
+  if (!commands[command]) {
+    console.error(`Unknown command: ${command}. Use: up | down | status`);
+    process.exit(1);
+  }
+
+  // Standalone pool for the CLI — closed after run
+  const pool = new Pool({
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT || '5432', 10),
+    database: process.env.DB_NAME || 'dispatchly',
+    user: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD || '',
   });
+
+  commands[command](pool)
+    .then(() => pool.end())
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error(err.message);
+      pool.end().finally(() => process.exit(1));
+    });
+}
